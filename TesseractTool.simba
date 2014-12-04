@@ -1,0 +1,769 @@
+program TesseractTool;
+
+// {$DEFINE NO_TESS}  If don't have tesseract but want to run the gui, etc.
+
+{$IFNDEF NO_TESS}
+  {$loadlib libTesseract2_32}
+{$ENDIF}
+
+const
+  VERSION = '1.00';
+  TESS_DATA_PATH = AppPath + 'tessdata';
+  TESS_LANGUAGE = 'eng';
+
+type
+  TTessMenu = record
+    Menu: TMenuItem;
+    WriteFilter: TMenuItem;
+    SetWhitelist: TMenuItem;
+    ResetWhitelist: TMenuItem;
+    Mode: TMenuItem;
+    ModeBlob, ModeRegular: TMenuItem;
+  end;
+
+type
+  TImageMenu = record
+    Menu: TMenuItem;
+    LoadClientImage: TMenuItem;
+    LoadImage: TMenuItem;
+    LoadFromClipboard: TMenuItem;
+  end;
+
+type
+  TThresholdSettings = record
+    gb: TGroupBox;
+    btnApply: TButton;
+    cbInvert: TCheckBox;
+    seAmount: TSpinEdit;
+    cbMethod: TComboBox;
+    lbl, lbl2, lbl3: TLabel;
+  end;
+
+type
+  TResizeSettings = record
+    gb: TGroupBox;
+    seWidth, seHeight: TSpinEdit;
+    lbl1, lbl2: TLabel;
+    btnResize: TButton;
+  end;
+
+type
+  TDrawnBox = record
+    Cols: TIntegerArray;
+    Points: TPointArray;
+    Drawn: Boolean;
+  end;
+
+var
+  frm: TForm;
+  sb: TScrollBox;
+  memo: TMemo;
+  pnl: TPanel;
+  img: TImage;
+  MainMenu: record Menu: TMainMenu; TessMenu: TTessMenu; ImageMenu: TImageMenu; end;
+  btnTesseract: TButton;
+  ThresholdSett: TThresholdSettings;
+  ResizeSett: TResizeSettings;
+  imgOffset: TPoint;
+  loadedImgWid, loadedImgHei: Integer;
+  DrawnBox: TDrawnBox;
+  SelectedBox: TBox;
+  boxStarted: Boolean;
+  boxPoint, LastPos: TPoint;
+  prevImages: array [0..2] of TMufasaBitmap; // ya, to-do.
+
+var
+  LoadedBMP: TMufasaBitmap; // Orginal loaded bitmap
+  currBMP: TMufasaBitmap;
+
+var
+  TessPtr: Pointer = nil;
+  TessIsSetup: Boolean = False;
+
+procedure Debug(const Str: String);
+begin
+  memo.getLines().add(Str);
+end;
+
+procedure Tess_Setup();
+var
+  Time: UInt64 := GetTickCount64();
+begin
+{$IFNDEF NO_TESS}
+  TessPtr := Tesseract_Create();
+
+  if (TessPtr = nil) then
+    Debug('ERROR: Failed to create a tesseract instance')
+  else begin
+    if (Tesseract_Init(TessPtr, TESS_DATA_PATH, TESS_LANGUAGE) <> 0) then
+      Debug('ERROR: Unable to initizalse tesseract, check Simba console for more infomation')
+    else begin
+      TessIsSetup := True;
+      Debug(Format('Tesseract setup in %d ms', [GetTickCount64() - Time]));
+    end;
+  end;
+{$ENDIF}
+end;
+
+procedure Tess_Free();
+begin
+{$IFNDEF NO_TESS}
+  if (not TessIsSetup) then
+    Exit();
+
+  Tesseract_End(TessPtr);
+  Tesseract_Delete(TessPtr);
+  TessPtr := nil;
+  TessIsSetup := False;
+{$ENDIF}
+end;
+
+function Tess_GetText(BMP: TMufasaBitmap): String;
+var
+  i: integer;
+  textLen: UInt32;
+  textPtr: PChar;
+begin
+{$IFNDEF NO_TESS}
+  Result := '';
+
+  try
+    Tesseract_SetImage(TessPtr, BMP.getData(), BMP.getWidth(), bmp.getHeight(), 4, Integer(BMP.getWidth() * 4));
+    textPtr := Tesseract_GetUTF8Text(TessPtr, textLen);
+
+    SetLength(Result, textLen);
+    if (textLen > 0) then
+    begin
+      for i := 1 to textLen do
+        Result[i] := textPtr[i - 1]^;
+    end;
+  finally
+    Tesseract_FreeUTF8Text(textPtr);
+    Tesseract_Clear(TessPtr);
+  end;
+{$ENDIF}
+end;
+
+procedure DrawMufasaBitmap(var BMP: TMufasaBitmap; const NewBMP: Boolean = True);
+var
+  i, h: Integer;
+  TBmp: TBitmap;
+  c: TPoint;
+begin
+  loadedImgHei := BMP.getHeight();
+  loadedImgWid := BMP.getWidth();
+
+  img.setWidth(Max(sb.getWidth(), loadedImgWid));
+  img.setHeight(Max(sb.getHeight(), loadedImgHei));
+  img.getPicture().Clear();
+
+  c.x := img.getWidth() div 2;
+  c.y := img.getHeight() div 2;
+
+  if (img.getHeight() = sb.getHeight()) and (img.getWidth() = sb.getWidth()) then
+    imgOffset := Point(c.x - loadedImgWid div 2, c.y - loadedImgHei div 2)
+  else
+    imgOffset := Point(-1, -1);
+
+  TBMP := BMP.ToTBitmap();
+  img.getPicture().setBitmap(TBMP);
+  TBMP.Free();
+  if (NewBMP) then
+  begin
+    if (CurrBMP <> nil) then
+      CurrBMP.Free();
+    CurrBMP := BMP.Copy();
+  end;
+
+  DrawnBox.Drawn := False;
+end;
+
+procedure LoadClientImage(Sender: TObject); Native;
+var
+  BMP: TMufasaBitmap;
+  W, H: Integer;
+begin
+  with (Client.getIOManager()) do
+  begin
+    if (not TargetValid) then
+    begin
+      Debug('Target isn''t vaild!!');
+      Exit();
+    end;
+
+    GetDimensions(W, H);
+    BMP.Init();
+    BMP.CopyClientToBitmap(Client.getIOManager(), True, 0, 0, W-1, H-1);
+    DrawMufasaBitmap(BMP);
+    if (LoadedBMP <> nil) then
+      LoadedBMP.Free();
+    LoadedBMP := BMP.Copy();
+    BMP.Free();
+    Debug('Loaded client image');
+  end;
+end;
+
+procedure LoadImage(Sender: TObject); Native;
+var
+  fl: TOpenDialog;
+  bmp: TMufasaBitmap;
+begin
+  fl.Init(frm);
+  fl.setFilter('Graphic (*.bmp;*.xpm;*.png;*.pbm;*.pgm;*.ppm;*.ico;*.icns;*.cur;*.jpg;*.jpeg;*.jpe;*.jfif)|*.bmp;*.xpm;*.png;*.pbm;*.pgm;*.ppm;*.ico;*.icns;*.cur;*.jpg;*.jpeg;*.jpe;*.jfif|Bitmaps (*.bmp)|*.bmp|Pixmap (*.xpm)|*.xpm|Portable Network Graphic (*.png)|*.png|Portable PixMap (*.pbm;*.pgm;*.ppm)|*.pbm;*.pgm;*.ppm|Icon (*.ico)|*.ico|OSX Icon Resource (*.icns)|*.icns|Cursor (*.cur)|*.cur|Joint Picture Expert Group (*.jpg;*.jpeg;*.jpe;*.jfif)|*.jpg;*.jpeg;*.jpe;*.jfif|All files (*.*)|*.*|');
+  fl.setOptions([ofFileMustExist]);
+  fl.setInitialDir(AppPath);
+
+  if (fl.Execute) then
+  begin
+    bmp.Init();
+    bmp.LoadFromFile(fl.getFileName());
+    DrawMufasaBitmap(bmp);
+    if (LoadedBMP <> nil) then
+      LoadedBMP.Free();
+    LoadedBMP := BMP.Copy();
+    bmp.Free();
+  end;
+
+  fl.Free();
+end;
+
+procedure LoadFromClipboard();
+var
+  TBMP: TBitmap;
+begin
+  if (LoadedBMP <> nil) then
+    LoadedBMP.Free();
+
+  LoadedBMP.Init();
+  TBMP.Init();
+
+  try
+    TBMP.LoadFromClipboardFormat();
+  except
+    Debug('Failed to load from clipboard: Wrong format!');
+    TBMP.Free();
+    Exit();
+  end;
+
+  LoadedBMP.LoadFromTBitmap(TBMP);
+  DrawMufasaBitmap(LoadedBMP);
+  TBMP.Free();
+end;
+
+procedure onNotifyEvent(Sender: TObject); Native;
+var
+  Time: UInt64 := GetTickCount64();
+  Str: String;
+  Lines: TStringArray;
+  i: Integer;
+  Method: TBmpThreshMethod;
+  Invert: Boolean;
+begin
+  case (Sender) of
+    btnTesseract:
+      begin
+        Str := Tess_GetText(CurrBMP);
+        Debug(Format('Tesseract took %d ms (%dx%d)', [getTickCount64() - Time, img.getPicture().getBitmap().getWidth(), img.getPicture().getBitmap().getHeight()]));
+        Debug('Result: ');
+
+        Lines := Explode(#10, Str);
+        for i := 0 to High(Lines) do
+        begin
+          Str := Trim(Lines[i]);
+
+          if (Str <> '') then
+            Debug(toString(i) + ') ' + Str);
+        end;
+      end;
+    ThresholdSett.btnApply:
+      begin
+        case (ThresholdSett.cbMethod.getCaption()) of
+          'TM_Mean': Method := TM_Mean;
+          'TM_MinMax': Method := TM_MinMax;
+        end;
+
+        case (ThresholdSett.cbInvert.getState()) of
+          cbChecked: Invert := True;
+          cbUnchecked: Invert := False;
+        end;
+
+        CurrBMP.ThresholdAdaptive(0, 255, Invert, Method, ThresholdSett.seAmount.getValue());
+        Debug(Format('Threshold took %d ms (%dx%d)', [GetTickCount64() - Time, img.getPicture().getBitmap().getWidth(), img.getPicture().getBitmap().getHeight()]));
+        DrawMufasaBitmap(CurrBMP, False);
+      end;
+    MainMenu.ImageMenu.LoadFromClipboard:
+      LoadFromClipboard();
+    MainMenu.TessMenu.WriteFilter:
+      begin
+        case (ThresholdSett.cbInvert.getState()) of
+          cbChecked: Invert := True;
+          cbUnchecked: Invert := False;
+        end;
+
+        Debug(Format('const MyFilter: TTesseractFilter = [%d, %d, [%s, %d, %s]];',
+              [ResizeSett.seWidth.getValue(), ResizeSett.seHeight.getValue(),
+               toString(Invert), ThresholdSett.seAmount.getValue(),
+               toString(ThresholdSett.cbMethod.getCaption())]));
+      end;
+    MainMenu.TessMenu.SetWhitelist:
+      begin
+        InputQuery('Tesseract Whitelist', 'Whitelist: ', Str);
+       {$IFNDEF NO_TESS} Tesseract_SetVariable(TessPtr, 'tessedit_char_whitelist', Str); {$ENDIF}
+      end;
+   MainMenu.TessMenu.ResetWhitelist:
+     begin
+       Tess_Free();
+       Tess_Setup();
+       Debug('Whitelist has been reset');
+     end;
+  end;
+end;
+
+procedure onKeyEvent(Sender: TObject; var Key: Word; Shift: TShiftState); Native;
+var
+  tmp: TMufasaBitmap;
+  c: TControl;
+begin
+  c := frm.getActiveControl();
+
+  if (Key = VK_RETURN) then // if enter is pressed, we dont want to take click a button.
+    if (c = btnTesseract) or (c = ResizeSett.btnResize) or (c = ThresholdSett.btnApply) then
+      frm.setActiveControl(nil);
+
+  case Key of
+    VK_V:
+      if (ssCtrl in Shift) then
+      begin
+        DebugLn('Paste');
+        LoadFromClipboard();
+      end;
+    VK_Z:
+      if (ssCtrl in Shift) then
+      begin
+        DebugLn('Undo, In time...');
+      end;
+    VK_Y:
+      if (ssCtrl in Shift) then
+      begin
+        DebugLn('Redo, In time...');
+      end;
+    VK_RETURN:
+      begin
+        DebugLn('Crop');
+
+        if (not DrawnBox.Drawn) then
+        begin
+          Debug('You must draw a box to be able to crop');
+          Exit();
+        end;
+
+        if (SelectedBox.X1 > SelectedBox.X2) then
+          Swap(SelectedBox.X1, SelectedBox.X2);
+        if (SelectedBox.Y1 > SelectedBox.Y2) then
+          Swap(SelectedBox.Y1, SelectedBox.Y2);
+
+        tmp.Init();
+        tmp := currBMP.Copy();
+        tmp.Crop(Max(SelectedBox.x1, 0), Max(SelectedBox.y1, 0), Min(SelectedBox.x2, img.getWidth() - 1), Min(SelectedBox.y2, img.getHeight() - 1));
+
+        DrawMufasaBitmap(tmp);
+        loadedBMP.Free();
+        loadedBMP := currBMP.Copy();
+
+        tmp.Free();
+      end;
+  end;
+end;
+
+procedure onImgMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer); Native;
+begin
+  if (imgOffset.x > -1) then
+  begin
+    dec(x, imgOffset.x);
+    dec(y, imgOffset.y);
+  end;
+
+  if (Button = mbLeft) then
+    if (not BoxStarted) then
+    begin
+      BoxStarted := True;
+      BoxPoint := Point(X, Y);
+    end else begin
+      SelectedBox := TBox([BoxPoint.x, BoxPoint.y, LastPos.x, LastPos.y]);
+      BoxStarted := False;
+    end;
+
+  if (Button = mbRight) then // Clear the box
+    if (DrawnBox.Drawn) then
+    begin
+      img.getCanvas().SetPixels(DrawnBox.Points, DrawnBox.Cols);
+      DrawnBox.Drawn := False;
+    end;
+end;
+
+procedure onImgMouseMove(Sender: TObject; Shift: TShiftState; x, y: Integer); Native;
+var
+  c: TCanvas;
+  BoxToDraw: TBox;
+  r: TRect;
+
+  function DashedEdgeFromBox(B:TBox): TPointArray;
+  var i:Integer;
+  begin
+    for i:=B.x1 to B.x2 do
+      if (i mod 4 <> 0) then
+      begin
+        Result := Result + Point(i,b.y1);
+        Result := Result + Point(i,b.y2);
+      end;
+    Inc(B.Y1); Dec(B.Y2);
+    for i:=B.y1 to B.y2 do
+      if (i mod 4 <> 0) then
+      begin
+        Result := Result + Point(b.x1,i);
+        Result := Result + Point(b.x2,i);
+      end;
+  end;
+
+  procedure CanvasSetPixelInv(Canvas:TCanvas; TPA:TPointArray);
+  var color: TRGB32; i: Integer;
+  begin
+    for i := 0 to High(TPA) do
+    begin
+      color := TRGB32(Canvas.GetPixel(TPA[i].x, TPA[i].y));
+      color.R := color.R xor 255;
+      color.G := color.G xor 255;
+      color.B := color.B xor 255;
+      Canvas.SetPixel(TPA[i].x, TPA[i].y, TColor(color));
+    end;
+  end;
+
+begin
+  if (not BoxStarted) then
+    Exit();
+
+  if (imgOffset.x <> -1) then
+  begin
+    Dec(x, imgOffset.x);
+    Dec(y, imgOffset.y);
+  end;
+
+  c := img.getCanvas();
+  if (DrawnBox.Drawn) then
+    c.SetPixels(DrawnBox.Points, DrawnBox.Cols);
+
+  BoxToDraw := TBox([BoxPoint.x, BoxPoint.y, x, y]);
+
+  BoxToDraw.X1 := Max(0, BoxToDraw.X1);
+  BoxToDraw.Y1 := Max(0, BoxToDraw.Y1);
+  BoxToDraw.X2 := Min(img.getWidth() - 1, BoxToDraw.X2);
+  BoxToDraw.Y2 := Min(img.getHeight() - 1, BoxToDraw.Y2);
+
+  if (BoxToDraw.X1 > BoxToDraw.X2) then
+    Swap(BoxToDraw.X1, BoxToDraw.X2);
+  if (BoxToDraw.Y1 > BoxToDraw.Y2) then
+    Swap(BoxToDraw.Y1,BoxToDraw.Y2);
+
+  DrawnBox.Points := DashedEdgeFromBox(BoxToDraw);
+  DrawnBox.Cols := c.GetPixels(DrawnBox.Points);
+  CanvasSetPixelInv(c, DrawnBox.Points);
+
+  DrawnBox.Drawn := True;
+  LastPos := TPoint([x, y]);
+
+  img.Repaint();
+end;
+
+procedure onSwitchMode(Sender: TObject); Native;
+begin
+  if (Sender = MainMenu.TessMenu.ModeBlob) then
+  begin
+    Debug('Tesseract mode = Blob (' + BoolToStr(Tesseract_SetVariable(TessPtr, 'tessedit_ocr_engine_mode', '1')) + ')');
+    MainMenu.TessMenu.ModeRegular.setChecked(False);
+    MainMenu.TessMenu.ModeBlob.setChecked(True);
+  end else if (Sender = MainMenu.TessMenu.ModeRegular) then
+  begin
+    Debug('Tesseract mode = Regular (' + BoolToStr(Tesseract_SetVariable(TessPtr, 'tessedit_ocr_engine_mode', '0')) + ')');
+    MainMenu.TessMenu.ModeRegular.setChecked(True);
+    MainMenu.TessMenu.ModeBlob.setChecked(False);
+  end;
+end;
+
+procedure Resize(Sender: TObject); Native;
+var
+  tmp: TMufasaBitmap;
+  NewW, NewH: Integer;
+  Time: UInt64 := GetTickCount64();
+begin
+  tmp := LoadedBMP.Copy();
+
+  NewW := tmp.getWidth() * ResizeSett.seWidth.getValue();
+  NewH := tmp.getHeight() * ResizeSett.seHeight.getValue();
+  DebugLn(Format('NewW %d, NewH %d', [NewW, NewH]));
+
+  tmp.ResizeEx(RM_Bilinear, NewW, NewH);
+  DrawMufasaBitmap(tmp);
+  tmp.Free();
+
+  Debug(Format('Resized Image (%d, %d) > (%d, %d) in %d ms', [LoadedBMP.getWidth(), LoadedBMP.getHeight(), NewW, NewH, GetTickCount64() - Time]));
+end;
+
+procedure Create_Form(); Native;
+var
+  i: Integer;
+  s: TStrings;
+  m: TMenuItem;
+begin
+  frm.Init(nil);
+  with (frm) do
+  begin
+    setCaption('Tesseract Tool (v'+VERSION+') - By Olly');
+    setWidth(800);
+    setHeight(600);
+    setPosition(poScreenCenter);
+    setOnKeyDown(onKeyEvent);
+    setOnShow(LoadClientImage);
+    getConstraints().setMinHeight(600);
+    getConstraints().setMinWidth(800);
+    setKeyPreview(True);
+    setDoubleBuffered(True);
+  end;
+
+  MainMenu.Menu.Init(frm);
+  with (MainMenu) do
+  begin
+    ImageMenu.Menu := Menu.AddMenu('Image');
+    ImageMenu.LoadClientImage := ImageMenu.Menu.AddMenu('Load Client Image');
+    ImageMenu.LoadClientImage.setOnClick(LoadClientImage);
+    ImageMenu.LoadImage := ImageMenu.Menu.AddMenu('Load Image');
+    ImageMenu.LoadImage.setOnClick(LoadImage);
+    ImageMenu.LoadFromClipboard := ImageMenu.Menu.AddMenu('Load From Clipboard (Ctrl+V)');
+    ImageMenu.LoadFromClipboard.setOnClick(onNotifyEvent);
+
+    TessMenu.Menu := Menu.AddMenu('Tesseract');
+    TessMenu.WriteFilter := TessMenu.Menu.AddMenu('Write Filter');
+    TessMenu.WriteFilter.setOnClick(onNotifyEvent);
+    TessMenu.SetWhitelist := TessMenu.Menu.AddMenu('Set Whitelist');
+    TessMenu.SetWhitelist.setOnClick(onNotifyEvent);
+    TessMenu.ResetWhitelist := TessMenu.Menu.AddMenu('Reset Whitelist');
+    TessMenu.ResetWhitelist.setOnClick(onNotifyEvent);
+
+    TessMenu.Mode := TessMenu.Menu.AddMenu('Mode');
+    TessMenu.ModeRegular := TessMenu.Mode.AddMenu('Regular');
+    TessMenu.ModeRegular.setOnClick(onSwitchMode);
+    TessMenu.ModeRegular.setChecked(True);
+    TessMenu.ModeBlob := TessMenu.Mode.AddMenu('Blob');
+    TessMenu.ModeBlob.setOnClick(onSwitchMode);
+  end;
+
+  sb.Init(frm);
+  with (sb) do
+  begin
+    setParent(frm);
+    setAlign(alClient);
+    setBorderStyle(bsNone);
+  end;
+
+  img.Init(frm);
+  with (img) do
+  begin
+    setParent(sb);
+    setWidth(1500);
+    setHeight(1500);
+    setCursor(crCross);
+    setCenter(True);
+    setOnMouseMove(onImgMouseMove);
+    setOnMouseDown(onImgMouseDown);
+  end;
+
+  pnl.Init(frm);
+  with (pnl) do
+  begin
+    setParent(frm);
+    setHeight(150);
+    setAlign(alBottom);
+    setBevelOuter(bvLowered);
+  end;
+
+  memo.Init(frm);
+  with (memo) do
+  begin
+    setReadOnly(True);
+    setParent(pnl);
+    setHeight(100);
+    setAlign(alBottom);
+    setScrollBars(ssAutoVertical);
+    Debug('Tesseract Tool Version ' + VERSION);
+    Debug('Hot Keys: Ctrl + Z = Undo | Ctrl + Y = Redo');
+  end;
+
+  btnTesseract.Init(frm);
+  with (btnTesseract) do
+  begin
+    setParent(pnl);
+    setAlign(alClient);
+    setCaption('Tesseract!');
+    setOnClick(onNotifyEvent);
+  end;
+
+  with (ThresholdSett) do
+  begin
+    gb.Init(frm);
+    with (gb) do
+    begin
+      setParent(pnl);
+      setAlign(alLeft);
+      setWidth(350);
+      setCaption('Threshold');
+    end;
+
+    lbl.Init(frm);
+    with (lbl) do
+    begin
+      setParent(gb);
+      setLeft(5);
+      setTop(5);
+      setWidth(lbl.getCanvas().TextWidth('Invert') + 10);
+      setCaption('Invert');
+    end;
+
+    cbInvert.Init(frm);
+    with (cbInvert) do
+    begin
+      setParent(gb);
+      setTop(lbl.getTop() - 1);
+      setLeft(lbl.getLeft() + lbl.getWidth());
+    end;
+
+    lbl2.Init(frm);
+    with (lbl2) do
+    begin
+      setParent(gb);
+      setLeft((cbInvert.getLeft() + cbInvert.getHeight()));
+      setTop(lbl.getTop());
+      setWidth(lbl.getCanvas().TextWidth('Method') + 5);
+      setCaption('Method');
+    end;
+
+    cbMethod.Init(frm);
+    with (cbMethod) do
+    begin
+      setParent(gb);
+      setTop(1);
+      setLeft((lbl2.getLeft() + lbl2.getWidth()) + 5);
+      setWidth(cbMethod.getCanvas().TextWidth('TM_MinMax') + 25);
+      setReadOnly(True);
+      getItems().Add('TM_Mean');
+      getItems().Add('TM_MinMax');
+      setCaption('TM_Mean');
+    end;
+
+    lbl3.Init(frm);
+    with (lbl3) do
+    begin
+      setParent(gb);
+      writeln(cbMethod.getWidth());
+      setLeft((cbMethod.getLeft() + cbMethod.getWidth()) + 7);
+      setTop(lbl.getTop());
+      setCaption('Amount');
+      setWidth(lbl.getCanvas().TextWidth('Amount') + 5);
+    end;
+
+    seAmount.Init(frm);
+    with (seAmount) do
+    begin
+      setParent(gb);
+      setTop(1);
+      setLeft((lbl3.getLeft() + lbl3.getWidth()) + 7);
+      setMinValue(-255);
+      setMaxValue(255);
+    end;
+
+    btnApply.Init(frm);
+    with (btnApply) do
+    begin
+      setParent(gb);
+      setLeft((seAmount.getLeft() + seAmount.getWidth()) + 8);
+      setCaption('Apply Threshold');
+      setOnClick(onNotifyEvent);
+      setWidth(frm.getCanvas().TextWidth('Apply Threshold') + 25);
+    end;
+
+    gb.setWidth((btnApply.getLeft() + btnApply.getWidth()) + 10);
+  end;
+
+  with (ResizeSett) do
+  begin
+    gb.Init(frm);
+    with (gb) do
+    begin
+      setParent(pnl);
+      setAlign(alLeft);
+      setWidth(220);
+      setCaption('Resize');
+    end;
+
+    lbl1.Init(frm);
+    with (lbl1) do
+    begin
+      setParent(gb);
+      setTop(5);
+      setLeft(5);
+      setCaption('W');
+    end;
+
+    seWidth.Init(frm);
+    with (seWidth) do
+    begin
+      setParent(gb);
+      setTop(2);
+      setValue(1);
+      setLeft(lbl1.getCanvas().TextWidth('W') + 10);
+    end;
+
+    lbl2.Init(frm);
+    with (lbl2) do
+    begin
+      setParent(gb);
+      setTop(5);
+      setLeft((seWidth.getLeft() + seWidth.getWidth()) + 8);
+      setCaption('H ');
+    end;
+
+    seHeight.Init(frm);
+    with (seHeight) do
+    begin
+      setParent(gb);
+      setTop(2);
+      setValue(1);
+      setLeft((seWidth.getLeft() + seWidth.getWidth()) + lbl2.getCanvas().TextWidth('H') + 15);
+    end;
+
+    btnResize.Init(frm);
+    with (btnResize) do
+    begin
+      setParent(gb);
+      setTop(1);
+      setWidth(lbl1.getCanvas().TextWidth('Resize') + 25);
+      setLeft((seHeight.getLeft() + seHeight.getWidth()) + 8);
+      setCaption('Resize');
+      setOnClick(Resize);
+    end;
+  end;
+
+  try
+    Tess_Setup();
+    frm.ShowModal();
+  finally
+    frm.Free();
+    Tess_Free();
+    if (LoadedBMP <> nil) then
+      LoadedBMP.Free();
+    if (CurrBMP <> nil) then
+      CurrBMP.Free();
+  end;
+end;
+
+begin
+  Sync(Create_Form);
+end.
